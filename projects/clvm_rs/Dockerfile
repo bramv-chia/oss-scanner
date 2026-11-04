@@ -11,6 +11,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUST_BACKTRACE=1 \
     CARGO_TERM_COLOR=never
 
+# Line-table debug info and frame pointers in every build, release and fuzz included, for usable stack traces.
+# The crate's release profile uses thin LTO; it is turned off here so release builds keep their debug info cheaply.
+ENV RUSTFLAGS="-C force-frame-pointers=yes" \
+    CFLAGS="-g -fno-omit-frame-pointer" \
+    CXXFLAGS="-g -fno-omit-frame-pointer" \
+    CARGO_PROFILE_RELEASE_DEBUG=1 \
+    CARGO_PROFILE_RELEASE_STRIP=none \
+    CARGO_PROFILE_RELEASE_LTO=false
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       clang pkg-config libssl-dev python3 python3-dev python3-venv gdb strace \
     && rm -rf /var/lib/apt/lists/*
@@ -32,8 +41,10 @@ WORKDIR /src
 # rust-toolchain.toml pins the stable toolchain; the first cargo call installs it while the network is up.
 RUN cargo --version && rustc --version
 
-# Every crate in Cargo.lock, for every target and feature.
+# Every crate in Cargo.lock, for every target and feature. From here on cargo must not reach a registry, so the
+# build itself shows the scan can run offline.
 RUN cargo fetch --locked
+ENV CARGO_NET_OFFLINE=true
 
 # The workspace as CI's build-test job builds it, plus every test binary for each feature variant it tests. A failing
 # step fails the build, and primary_contact gets the log.
@@ -44,8 +55,8 @@ RUN cargo build --locked --workspace --exclude clvm_rs-fuzz --all-targets \
          cargo test --locked --features="$f" --no-run || exit 1; \
        done
 
-# The Python extension with debug info, for Python reproducers.
-RUN CARGO_PROFILE_RELEASE_DEBUG=true maturin build --release --locked -m wheel/Cargo.toml -i /opt/venv/bin/python \
+# The Python extension, for Python reproducers.
+RUN maturin build --release --locked -m wheel/Cargo.toml -i /opt/venv/bin/python \
       --out /opt/wheels \
     && pip install --no-deps /opt/wheels/clvm_rs-*.whl
 
@@ -54,5 +65,3 @@ RUN cargo +"${FUZZ_NIGHTLY}" fuzz build || echo "WARNING: cargo fuzz build faile
 
 # Smoke tests so the log shows the image works; a failure does not fail the build.
 RUN timeout 1200 cargo test --locked --release || echo "WARNING: cargo test reported failures"
-
-ENV CARGO_NET_OFFLINE=true
